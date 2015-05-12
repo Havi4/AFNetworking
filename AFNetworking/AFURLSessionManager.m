@@ -277,31 +277,6 @@ static inline BOOL af_addMethod(Class class, SEL selector, Method method) {
 static NSString * const AFNSURLSessionTaskDidResumeNotification  = @"com.alamofire.networking.nsurlsessiontask.resume";
 static NSString * const AFNSURLSessionTaskDidSuspendNotification = @"com.alamofire.networking.nsurlsessiontask.suspend";
 
-@interface NSURLSessionTask (_AFStateObserving)
-@end
-
-@implementation NSURLSessionTask (_AFStateObserving)
-
-- (void)af_resume {
-    NSURLSessionTaskState state = self.state;
-    [self af_resume];
-
-    if (state != NSURLSessionTaskStateRunning) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:AFNSURLSessionTaskDidResumeNotification object:self];
-    }
-}
-
-- (void)af_suspend {
-    NSURLSessionTaskState state = self.state;
-    [self af_suspend];
-
-    if (state != NSURLSessionTaskStateSuspended) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:AFNSURLSessionTaskDidSuspendNotification object:self];
-    }
-}
-
-@end
-
 @interface _AFURLSessionTaskSwizzling : NSObject
 
 @end
@@ -310,41 +285,73 @@ static NSString * const AFNSURLSessionTaskDidSuspendNotification = @"com.alamofi
 
 + (void)load {
     /**
-     *  Due to the class cluster nature of an NSURLSessionTask and varying class hierarchy between iOS 7 and 8,
-     *  swizzling the implementation of the resume and suspend methods is quite complicated. In both versions of
-     *  iOS, the METHOD IMPs reside in the  reside in the `__NSCFLocalSessionTask` private class. This means
-     *  that the class `load` method cannot be overridden directly since it's a private class. Therefore, the class
-     *  needs to be fetched directly. The classic ways to fetch the class all work differently due to the class
-     *  cluster. The following three approaches produce very different classes between iOS 7 and 8.
-     *
-     *      Class class1 = [[[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:@""]] superclass];
-     *      Class class2 = [NSClassFromString(@"NSURLSessionDataTask") superclass];
-     *      Class class3 = NSClassFromString(@"NSURLSessionTask");
-     *
-     *          NSLog(@"%p - %@, %p - %@, %p - %@",
-     *                class1, NSStringFromClass(class1),
-     *                class2, NSStringFromClass(class2),
-     *                class3, NSStringFromClass(class3));
-     *
-     *  Outputs the following:
-     *  - iOS 7: 0x5da7b28 - __NSCFLocalSessionTask, 0x5da7c90 - __NSCFURLSessionDataTask, 0x1481f4c - NSURLSessionTask
-     *  - iOS 8: 0x6644554 - __NSCFLocalSessionTask, 0x6644fb8 - NSURLSessionTask, 0x6644fb8 - NSURLSessionTask
+     * WARNING: Trouble Ahead
      */
 
     if (NSClassFromString(@"NSURLSessionTask")) {
-        NSURLSessionDataTask *dataTask = [[NSURLSession sessionWithConfiguration:nil] dataTaskWithURL:nil];
-        Class urlSessionTaskClass = [dataTask superclass];
+        NSURLSessionDataTask *foregroundDataTask = [[NSURLSession sessionWithConfiguration:nil] dataTaskWithURL:nil];
+        NSMutableArray *classesArray = [NSMutableArray array];
+        [classesArray addObject:[[foregroundDataTask superclass] superclass]];
+#if TARGET_OS_IPHONE
+        // ON iOS 7 or OS 10.9, __NSCFLocalSessionTask doesnt call super from resume or suspend.
+        // This means we have to swizzle two classes
+        if (NSFoundationVersionNumber <= NSFoundationVersionNumber_iOS_7_1) {
+            [classesArray addObject:[foregroundDataTask superclass]];
+        }
+#else 
+        if (NSFoundationVersionNumber <= NSFoundationVersionNumber10_9_2) {
+            [classesArray addObject:[foregroundDataTask superclass]];
+        }
+#endif
+        [classesArray enumerateObjectsUsingBlock:^(Class class, NSUInteger idx, BOOL *stop) {
+            [self swizzleResumeAndSuspendMethodForClass:class];
+        }];
+        [foregroundDataTask cancel];
+    }
+}
 
-        Method afResumeMethod = class_getInstanceMethod([NSURLSessionTask class], @selector(af_resume));
-        Method afSuspendMethod = class_getInstanceMethod([NSURLSessionTask class], @selector(af_suspend));
-        
-        af_addMethod(urlSessionTaskClass, @selector(af_resume), afResumeMethod);
-        af_addMethod(urlSessionTaskClass, @selector(af_suspend), afSuspendMethod);
-        
-        af_swizzleSelector(urlSessionTaskClass, @selector(resume), @selector(af_resume));
-        af_swizzleSelector(urlSessionTaskClass, @selector(suspend), @selector(af_suspend));
-        
-        [dataTask cancel];
++ (void)swizzleResumeAndSuspendMethodForClass:(Class)class {
+    Method afResumeMethod = class_getInstanceMethod(self, @selector(af_resume));
+    Method afSuspendMethod = class_getInstanceMethod(self, @selector(af_suspend));
+    
+    af_addMethod(class, @selector(af_resume), afResumeMethod);
+    af_addMethod(class, @selector(af_suspend), afSuspendMethod);
+    
+    af_swizzleSelector(class, @selector(resume), @selector(af_resume));
+    af_swizzleSelector(class, @selector(suspend), @selector(af_suspend));
+}
+
+- (void)af_resume {
+    NSURLSessionTaskState state;
+    SEL selector = @selector(state);
+    NSAssert(selector, @"Does not respond to state");
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:
+                                [[self class] instanceMethodSignatureForSelector:selector]];
+    [invocation setSelector:selector];
+    [invocation setTarget:self];
+    [invocation invoke];
+    [invocation getReturnValue:&state];
+    [self af_resume];
+    
+    if (state != NSURLSessionTaskStateRunning) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:AFNSURLSessionTaskDidResumeNotification object:self];
+    }
+}
+
+- (void)af_suspend {
+    NSURLSessionTaskState state;
+    SEL selector = @selector(state);
+    NSAssert(selector, @"Does not respond to state");
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:
+                                [[self class] instanceMethodSignatureForSelector:selector]];
+    [invocation setSelector:selector];
+    [invocation setTarget:self];
+    [invocation invoke];
+    [invocation getReturnValue:&state];
+    [self af_suspend];
+    
+    if (state != NSURLSessionTaskStateSuspended) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:AFNSURLSessionTaskDidSuspendNotification object:self];
     }
 }
 @end

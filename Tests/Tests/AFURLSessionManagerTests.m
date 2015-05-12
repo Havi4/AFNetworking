@@ -19,19 +19,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
+#import <objc/runtime.h>
+
 #import "AFTestCase.h"
 
 #import "AFURLSessionManager.h"
 
 @interface AFURLSessionManagerTests : AFTestCase
-@property (readwrite, nonatomic, strong) AFURLSessionManager *manager;
+@property (readwrite, nonatomic, strong) AFURLSessionManager *foregroundManager;
 @end
+
 
 @implementation AFURLSessionManagerTests
 
 - (void)setUp {
     [super setUp];
-    self.manager = [[AFURLSessionManager alloc] init];
+    self.foregroundManager = [[AFURLSessionManager alloc] init];
+}
+
+- (void)tearDown {
+    [super tearDown];
+    [self.foregroundManager invalidateSessionCancelingTasks:YES];
+    self.foregroundManager = nil;
 }
 
 #pragma mark -
@@ -42,7 +51,7 @@
     [overallProgress becomeCurrentWithPendingUnitCount:80];
     NSProgress *uploadProgress = nil;
 
-    [self.manager uploadTaskWithRequest:[NSURLRequest requestWithURL:self.baseURL]
+    [self.foregroundManager uploadTaskWithRequest:[NSURLRequest requestWithURL:self.baseURL]
                                fromData:[NSData data]
                                  progress:&uploadProgress
                         completionHandler:nil];
@@ -63,7 +72,7 @@
     [overallProgress becomeCurrentWithPendingUnitCount:80];
     NSProgress *downloadProgress = nil;
 
-    [self.manager downloadTaskWithRequest:[NSURLRequest requestWithURL:self.baseURL]
+    [self.foregroundManager downloadTaskWithRequest:[NSURLRequest requestWithURL:self.baseURL]
                                  progress:&downloadProgress
                               destination:nil
                         completionHandler:nil];
@@ -79,121 +88,160 @@
 }
 
 - (void)testDidResumeNotificationIsReceivedByDataTaskAfterResume {
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionDataTask *task = [self.manager dataTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
+    NSURLSessionDataTask *task = [self.foregroundManager dataTaskWithRequest:[self _delayURLRequest]
                                                  completionHandler:nil];
-    [task resume];
-    [task suspend];
-    [self expectationForNotification:@"com.alamofire.networking.task.resume"
-                              object:nil
-                             handler:nil];
-    [task resume];
-    [self waitForExpectationsWithTimeout:2.0 handler:nil];
-    [task cancel];
+    [self _testResumeNotificationForTask:task];
 }
 
 - (void)testDidSuspendNotificationIsReceivedByDataTaskAfterSuspend {
-    [self expectationForNotification:@"com.alamofire.networking.task.suspend"
-                              object:nil
-                             handler:nil];
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionDataTask *task = [self.manager dataTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
+    NSURLSessionDataTask *task = [self.foregroundManager dataTaskWithRequest:[self _delayURLRequest]
                                                  completionHandler:nil];
-    [task resume];
-    [task suspend];
-    [self waitForExpectationsWithTimeout:2.0 handler:nil];
-    [task cancel];
+    [self _testSuspendNotificationForTask:task];
 }
 
 - (void)testDidResumeNotificationIsReceivedByUploadTaskAfterResume {
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionUploadTask *task = [self.manager uploadTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
+    NSURLSessionUploadTask *task = [self.foregroundManager uploadTaskWithRequest:[self _delayURLRequest]
                                                               fromData:[NSData data]
                                                               progress:nil
                                                      completionHandler:nil];
-    [task resume];
-    [task suspend];
-    [self expectationForNotification:@"com.alamofire.networking.task.resume"
-                              object:nil
-                             handler:nil];
-    [task resume];
-    [self waitForExpectationsWithTimeout:2.0 handler:nil];
-    [task cancel];
+    [self _testResumeNotificationForTask:task];
 }
 
 - (void)testDidSuspendNotificationIsReceivedByUploadTaskAfterSuspend {
-    [self expectationForNotification:@"com.alamofire.networking.task.suspend"
-                              object:nil
-                             handler:nil];
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionUploadTask *task = [self.manager uploadTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
+    NSURLSessionUploadTask *task = [self.foregroundManager uploadTaskWithRequest:[self _delayURLRequest]
                                                               fromData:[NSData data]
                                                               progress:nil
                                                      completionHandler:nil];
-    [task resume];
-    [task suspend];
-    [self waitForExpectationsWithTimeout:2.0 handler:nil];
-    [task cancel];
+    [self _testSuspendNotificationForTask:task];
 }
 
 - (void)testDidResumeNotificationIsReceivedByDownloadTaskAfterResume {
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionDownloadTask *task = [self.manager downloadTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
+    NSURLSessionDownloadTask *task = [self.foregroundManager downloadTaskWithRequest:[self _delayURLRequest]
                                                                 progress:nil
                                                              destination:nil
                                                        completionHandler:nil];
-    [task resume];
-    [task suspend];
-    [self expectationForNotification:@"com.alamofire.networking.task.resume"
-                              object:nil
-                             handler:nil];
-    [task resume];
-    [self waitForExpectationsWithTimeout:2.0 handler:nil];
-    [task cancel];
+    [self _testResumeNotificationForTask:task];
 }
 
 - (void)testDidSuspendNotificationIsReceivedByDownloadTaskAfterSuspend {
-    [self expectationForNotification:@"com.alamofire.networking.task.suspend"
-                              object:nil
-                             handler:nil];
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionDownloadTask *task = [self.manager downloadTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
+    NSURLSessionDownloadTask *task = [self.foregroundManager downloadTaskWithRequest:[self _delayURLRequest]
                                                                 progress:nil
                                                              destination:nil
                                                        completionHandler:nil];
+    [self _testSuspendNotificationForTask:task];
+}
+
+- (void)testSwizzlingIsProperlyConfiguredForDummyClass {
+    IMP originalAFResumeIMP = [self _originalAFResumeImplementation];
+    IMP originalAFSuspendIMP = [self _originalAFSuspendImplementation];
+    XCTAssert(originalAFResumeIMP, @"Swizzled af_resume Method Not Found");
+    XCTAssert(originalAFSuspendIMP, @"Swizzled af_suspend Method Not Found");
+    XCTAssertNotEqual(originalAFResumeIMP, originalAFSuspendIMP, @"af_resume and af_suspend should not be equal");
+}
+
+- (void)testSwizzlingIsWorkingAsExpectedForForegroundDataTask {
+    NSURLSessionTask *task = [self.foregroundManager dataTaskWithRequest:[self _delayURLRequest]
+                                             completionHandler:nil];
+    [self _testSwizzlingForTask:task];
+    [task cancel];
+}
+
+- (void)testSwizzlingIsWorkingAsExpectedForForegroundUpload {
+    NSURLSessionTask *task = [self.foregroundManager uploadTaskWithRequest:[self _delayURLRequest]
+                                                        fromData:[NSData data]
+                                                        progress:nil
+                                               completionHandler:nil];
+    [self _testSwizzlingForTask:task];
+    [task cancel];
+}
+
+- (void)testSwizzlingIsWorkingAsExpectedForForegroundDownload {
+    NSURLSessionTask *task = [self.foregroundManager downloadTaskWithRequest:[self _delayURLRequest]
+                                                          progress:nil
+                                                       destination:nil
+                                                 completionHandler:nil];
+    [self _testSwizzlingForTask:task];
+    [task cancel];
+}
+
+- (void)testSwizzlingIsWorkingAsExpectedForBackgroundDataTask {
+    [self _testSwizzlingForTaskClass:NSClassFromString(@"__NSCFBackgroundDataTask")];
+}
+
+- (void)testSwizzlingIsWorkingAsExpectedForBackgroundUploadTask {
+    [self _testSwizzlingForTaskClass:NSClassFromString(@"__NSCFBackgroundUploadTask")];
+}
+
+- (void)testSwizzlingIsWorkingAsExpectedForBackgroundDownloadTask {
+    [self _testSwizzlingForTaskClass:NSClassFromString(@"__NSCFBackgroundDownloadTask")];
+}
+
+#pragma private
+
+- (void)_testResumeNotificationForTask:(NSURLSessionTask *)task {
+    [self expectationForNotification:AFNetworkingTaskDidResumeNotification
+                              object:nil
+                             handler:nil];
     [task resume];
     [task suspend];
+    [task resume];
     [self waitForExpectationsWithTimeout:2.0 handler:nil];
     [task cancel];
 }
 
-- (void)testSwizzlingIsWorkingAsExpected {
-    [self expectationForNotification:@"com.alamofire.networking.task.suspend"
+- (void)_testSuspendNotificationForTask:(NSURLSessionTask *)task {
+    [self expectationForNotification:AFNetworkingTaskDidSuspendNotification
                               object:nil
                              handler:nil];
-    NSURL *delayURL = [self.baseURL URLByAppendingPathComponent:@"delay/1"];
-    NSURLSessionDownloadTask *task = [self.manager downloadTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
-                                                                progress:nil
-                                                             destination:nil
-                                                       completionHandler:nil];
     [task resume];
     [task suspend];
+    [task resume];
     [self waitForExpectationsWithTimeout:2.0 handler:nil];
     [task cancel];
-    
-    
-    [self expectationForNotification:@"com.alamofire.networking.task.suspend"
-                              object:nil
-                             handler:nil];
-    
-    NSURLSessionDataTask *uploadTask = [self.manager uploadTaskWithRequest:[NSURLRequest requestWithURL:delayURL]
-                                                                  fromData:[NSData data]
-                                                                  progress:nil
-                                                         completionHandler:nil];
-    [uploadTask resume];
-    [uploadTask suspend];
-    [self waitForExpectationsWithTimeout:2.0 handler:nil];
-    [uploadTask cancel];
 }
+
+- (NSURLRequest *)_delayURLRequest {
+    return [NSURLRequest requestWithURL:[self.baseURL URLByAppendingPathComponent:@"delay/1"]];
+}
+
+- (IMP)_implementationForTask:(NSURLSessionTask  *)task selector:(SEL)selector {
+    return [self _implementationForClass:[task class] selector:selector];
+}
+
+- (IMP)_implementationForClass:(Class)class selector:(SEL)selector {
+    return method_getImplementation(class_getInstanceMethod(class, selector));
+}
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wundeclared-selector"
+- (IMP)_originalAFResumeImplementation {
+    return method_getImplementation(class_getInstanceMethod(NSClassFromString(@"_AFURLSessionTaskSwizzling"), @selector(af_resume)));
+}
+
+- (IMP)_originalAFSuspendImplementation {
+    return method_getImplementation(class_getInstanceMethod(NSClassFromString(@"_AFURLSessionTaskSwizzling"), @selector(af_suspend)));
+}
+
+- (void)_testSwizzlingForTask:(NSURLSessionTask *)task {
+    [self _testSwizzlingForTaskClass:[task class]];
+}
+
+- (void)_testSwizzlingForTaskClass:(Class)class {
+    IMP originalAFResumeIMP = [self _originalAFResumeImplementation];
+    IMP originalAFSuspendIMP = [self _originalAFSuspendImplementation];
+    
+    IMP taskResumeImp = [self _implementationForClass:class selector:@selector(resume)];
+    IMP taskSuspendImp = [self _implementationForClass:class selector:@selector(suspend)];
+    XCTAssertEqual(originalAFResumeIMP, taskResumeImp, @"resume has not been properly swizzled for %@", NSStringFromClass(class));
+    XCTAssertEqual(originalAFSuspendIMP, taskSuspendImp, @"suspend has not been properly swizzled for %@", NSStringFromClass(class));
+    
+    IMP taskAFResumeImp = [self _implementationForClass:class selector:@selector(af_resume)];
+    IMP taskAFSuspendImp = [self _implementationForClass:class selector:@selector(af_suspend)];
+    XCTAssert(taskAFResumeImp != NULL, @"af_resume is nil. Something has not been been swizzled right for %@", NSStringFromClass(class));
+    XCTAssertNotEqual(taskAFResumeImp, taskResumeImp, @"af_resume has not been properly swizzled for %@", NSStringFromClass(class));
+    XCTAssert(taskAFSuspendImp != NULL, @"af_suspend is nil. Something has not been been swizzled right for %@", NSStringFromClass(class));
+    XCTAssertNotEqual(taskAFSuspendImp, taskSuspendImp, @"af_suspend has not been properly swizzled for %@", NSStringFromClass(class));
+}
+#pragma clang diagnostic pop
 
 @end
